@@ -1,0 +1,215 @@
+---
+title: "Practical Machine Learning - Course Project"
+date: "Tuesday, December 16th 2014"
+output: html_document
+---
+##Exercise Method Classification Using Data from Wearable Devices
+
+##Synopsis
+People regularly quantify how much of a particular activity or exercise they do, but they rarely quantify how well they do it. The goal of this project is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants who use wearable devices and predict the manner in which they did the exercise. For more information on this project, please visit <http://groupware.les.inf.puc-rio.br/har>. 
+
+##Data Preprocessing
+The training data for this project are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>. The test data are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+```{r results='hide', message=FALSE}
+rm (list = ls())
+library (caret)
+library(rattle)
+library (e1071)
+library (party)
+```
+The following steps were taken to preprocess (load and clean) the data: 
+
+1. We load the training and test data and handle the erroneous and NA values. 
+2. There are a large number of predictors in the dataset i.e. 160. Since we do not want to work with 160 predictors, we find the predictors that have near zero variability and remove them from the datasets. 
+3. There are a large number of NA values in many of thre columns in the dataset. Too many NA values does not help in prediction. In this case, I removed the predictors that had more than 50% of their values as NA. 
+4. The first seven columns in the dataset do not add any value in terms of predictability. So I removed them from the datasets. Now the data has 53 predictors. 
+5. Partition the training dataset such that we use 60% of the training data for model training. The other 40% will be used for testing. **These partitioned datasets will be referred to as the _training and test_ datasets from now on.** The test dataset provided by prof. Leek will be used only for prediction. From here onwards, I will refer to this data as the **_final prediction dataset_** to avoid confusion. 
+
+```{r DataPreProcessing}
+# Load the datasets
+training <- read.csv ("pml-training.csv", na.strings=c("NA","#DIV/0!",""))
+testing <- read.csv ("pml-testing.csv", na.strings=c("NA","#DIV/0!",""))
+
+set.seed (101)
+
+# Find predictors with zero variability
+nzvTrainSubset <- nearZeroVar(training)
+#nPredTrainInitial <- dim (training)
+
+# Remove the near zero variability predictors from the datasets
+training <- training [, -nzvTrainSubset]
+testing <- testing [, -nzvTrainSubset]
+
+#nPredTrainAfter <- dim (training)
+#nPredTestAfter <- dim (testing)
+
+# Count the number of non-NAs in each col.
+naCounts <- function(x) {
+  as.vector(apply(x, 2, function(x) length(which(is.na(x)))))
+}
+
+# Build vector of missing data or NA columns to drop.
+colNACounts <- naCounts(training)
+drops <- c()
+for (cnt in 1:length(colNACounts)) {
+  if (colNACounts[cnt] > 0.5 * nrow(training)) {
+    drops <- c(drops, colnames(training)[cnt])
+  }
+}
+
+# Drop the columns that have more than 50% of their values as NA. 
+training <- training [, !names(training) %in% drops]
+testing <- testing [, !names(testing) %in% drops]
+
+# Remove the first 7 columns since they don't add any value to the dataset
+training <- training [, 7:length(names(training))]
+testing <- testing [, 7:length(names(testing))]
+
+# Partition the training dataset into training and test datasets. 60% of the training data will be used for model training and the other 40% will be used for testing.
+# From here onwards, I will refer to this data as the "final prediction dataset" to avoid confusion. 
+inTrainSubset <- createDataPartition (training$classe, p = 0.6, list = FALSE)
+trainSubset <- training[inTrainSubset,]
+trainTestSubset <- training [-inTrainSubset, ]
+
+# Final training dataset dimensions
+dim (trainSubset)
+``` 
+
+##Model
+###Classification Tree Model
+First I attempted to use a classification tree model using k-fold validation with k = 10. I used k-fold validation throughout this project on the training set whenever possible. 
+
+```{r ClassificationTree, message=FALSE}
+# Define train control method to apply K-Fold validation on the classification models. 
+train_control <- trainControl(method="cv", number=10)
+
+# Fit the training data to the "Classification Trees" algorithm. 
+modTreesFit <- train (classe ~ ., method = "rpart", 
+                      trControl = train_control, data = trainSubset)
+predModTreesFit <- predict(modTreesFit, newdata = trainTestSubset)
+cfMx <- confusionMatrix(predModTreesFit, trainTestSubset$classe)
+accuracy <- round(cfMx$overall["Accuracy"], digits=4) * 100
+accuracy
+```
+
+The results of the classification tree model were disappointing with an accuracy was only **`r round(cfMx$overall["Accuracy"], digits=4) * 100`%**. So I proceeded to use the classification tree approach with bagging using the `treebag` model in the `caret` package. 
+
+###Classification Tree Model with Bagging
+```{r ClassificationTreeWithBagging, message=FALSE}
+# Classification Trees with Bagging
+modTreeBag <- bag(trainSubset[, -53], trainSubset$classe, B = 10, 
+                  trControl=train_control, 
+                  bagControl = bagControl(fit = ctreeBag$fit,
+                                          predict = ctreeBag$pred, 
+                                          aggregate = ctreeBag$aggregate))
+
+predModTreeBag <- predict(modTreeBag, trainTestSubset)
+cfMx <- confusionMatrix(predModTreeBag, trainTestSubset$classe)
+accuracy <- round(cfMx$overall["Accuracy"], digits=4) * 100
+accuracy
+```
+
+The results of the bagged classification tree model were much better with an accuracy of **`r round(cfMx$overall["Accuracy"], digits=4) * 100`%**. Since we know that the random forest algorithm can be very accurate, I used it to create a model as shown below. Note that we do not use cross validation here since the random forest algorithm already has cross validation built into it as described by the authors of the original algorithm here <https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr>. However, we will, of course, validate the model on our test dataset. 
+
+```{r RandomForests, message=FALSE}
+# Random Forests
+modFitRF <- train(classe ~ ., method="rf", data=trainSubset, verbose = FALSE)
+varImpObj <- varImp(modFitRF)
+# Plot the importance of the top 20 predictors.
+plot(varImpObj, main = "Variable Importance of Top 20 Predictors", top = 20)
+# Model Structure
+print(modFitRF, digits = 3)
+# Plot the accuracy of predictors in the model
+plot (modFitRF, log = "y", lwd = 2, main = "Random forest accuracy", 
+      xlab = "Predictors", ylab = "Accuracy")
+predModRF <- predict(modFitRF, trainTestSubset)
+cfMxRF <- confusionMatrix(predModRF, trainTestSubset$classe)
+accuracy <- round(cfMxRF$overall["Accuracy"], digits=4) * 100
+accuracy
+```
+
+The results of the random forest model were much better than the bagged classification tree with an accuracy of **`r round(cfMxRF$overall["Accuracy"], digits=4) * 100`%**. `r modFitRF$bestTune` predictors were used in the final model to get the most accurate model. 
+
+###Stacked Model
+Technically, at this point, I could have applied the random forest model on the prediction test dataset. However, in an effort to further improve the accuracy, I decided to create a stacked model.
+
+Since boosting and support vector machine algorithms are known for their high accuracy along with random forests, I decided to create models based on these algorithms and then create a stacked model on top of these models. 
+
+#### Boosting Model
+```{r Boosting, message=FALSE}
+# Boosting
+modFitGBMBoost <- train(classe ~ ., method="gbm", data=trainSubset, 
+                        trControl = train_control, 
+                        verbose = FALSE)
+predModGBMBoost <- predict(modFitGBMBoost, trainTestSubset)
+cfMx <- confusionMatrix(predModGBMBoost, trainTestSubset$classe)
+accuracy <- round(cfMx$overall["Accuracy"], digits=4) * 100
+accuracy
+```
+
+The results of the boosting algorithm were better than the bagged classification tree but not better than the random forest. The boosting algorithm resulted in an accuracy of **`r round(cfMx$overall["Accuracy"], digits=4) * 100`%**. 
+
+#### Support Vector Machine Model
+```{r SVM, message=FALSE}
+# SVM
+svmFit <- train(classe ~ ., preProcess=c("center","scale"), 
+                   method="svmPoly", data=trainSubset, 
+                   trControl = train_control, 
+                   verbose = FALSE)
+svmPred <- predict(svmFit, trainTestSubset)
+cfMx <- confusionMatrix(svmPred, trainTestSubset$classe)
+accuracy <- round(cfMx$overall["Accuracy"], digits=4) * 100
+accuracy
+```
+
+The results of the SVM model were almost exactly the same as the random forest with an accuracy of **`r round(cfMx$overall["Accuracy"], digits=4) * 100`%**. 
+
+#### Stacked Model
+I used the bagged classification tree, boosting, random forest and support vector machine models to create a stacked model. The final stacked model used random forests for stacking as shown below. 
+
+```{r Stacked Model}
+# Stacked Model
+# Training Predictions
+predTrainTreeBag <- predict (modTreeBag, trainSubset)
+predTrainBoost <- predict (modFitGBMBoost, trainSubset)
+predTrainRF <- predict (modFitRF, trainSubset)
+predTrainSVM <- predict (svmFit, trainSubset)
+
+# Stacked Training Dataset
+stackedTrainPredData <- data.frame (tree1 = predTrainTreeBag, boost1 = predTrainBoost, 
+                                    rf1 = predTrainRF, svm1 = predTrainSVM, 
+                                    classe = trainSubset$classe)
+
+# Stacked Model
+modStackedFitRF <- train (classe ~ ., method = "rf", data = stackedTrainPredData)
+
+# Testing Predictions
+predTestTreeBag <- predict (modTreeBag, trainTestSubset)
+predTestBoost <- predict (modFitGBMBoost, trainTestSubset)
+predTestRF <- predict (modFitRF, trainTestSubset)
+predTestSVM <- predict (svmFit, trainTestSubset)
+
+# Stacked Testing Dataset
+stackedTestPredData <- data.frame (tree1 = predTestTreeBag, boost1 = predTestBoost, 
+                                   rf1 = predTestRF, svm1 = predTestSVM, 
+                                   classe = trainTestSubset$classe)
+
+# Stacked Model Testing Predictions
+predModStackedRF <- predict (modStackedFitRF, stackedTestPredData) 
+cfMx <- confusionMatrix(predModStackedRF, trainTestSubset$classe)
+accuracy <- round(cfMx$overall["Accuracy"], digits=4) * 100
+accuracy
+```
+
+The stacked model resulted in almost the same accuracy as the random forests i.e. **`r round(cfMx$overall["Accuracy"], digits=4) * 100`%**. So we will use the random forests model on the prediction test dataset. 
+
+## Out of Sample Error
+The out of sample error estimate of the Random Forest model was calculated by using the formula: "1 - (Random Forest Model Accuracy)" = **`r (1-round(cfMxRF$overall["Accuracy"], digits=4)) * 100`%**. This means that we should be able to correctly predict the outcome for 19 out of the 20 data points in the final prediction dataset.
+
+## Results
+Applying the random forests model on the final prediction dataset, I got the following results. 
+```{r PredictionsFinal}
+answers <- predict (modFitRF, testing) 
+answers
+```
